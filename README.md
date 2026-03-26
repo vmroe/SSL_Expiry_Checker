@@ -8,15 +8,16 @@ No third-party modules or Excel required.
 
 # Path to the input file.
 TXT format  - one entry per line, port is optional:
-        portal01.zone-a.company.com:443
-        portal02.zone-a.company.com:5480
-        portal03.zone-a.company.com:9200
-        portal04.zone-a.company.com        <- uses -DefaultPort if no port given
+- portal01.zone-a.company.com:443
+- portal02.zone-a.company.com:5480
+- portal03.zone-a.company.com:9200
+- portal04.zone-a.company.com        <- uses -DefaultPort if no port given
+
 CSV format  - a column for FQDN and an optional column for port:
-        fqdn,port
-        portal01.zone-a.company.com,443
-        portal02.zone-a.company.com,5480
-    Lines starting with # and blank lines are always skipped.
+- fqdn,port
+- portal01.zone-a.company.com,443
+- portal02.zone-a.company.com,5480
+- Lines starting with # and blank lines are always skipped.
 
 # OutputFolder
 Folder where the dated report file will be saved.
