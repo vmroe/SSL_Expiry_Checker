@@ -3,50 +3,94 @@
 .SYNOPSIS
     Checks SSL certificate expiry for FQDNs listed in a TXT or CSV file.
     Port can be specified per entry directly in the input file.
+
 .DESCRIPTION
     Reads FQDN:PORT pairs from a plain text file or CSV file, connects to each
     host on the specified port over TLS, retrieves the certificate expiry date,
     and outputs a single list sorted by days remaining (soonest expiring first).
-    The report file is automatically named ssl_expiry_report_YYYYMMDD.txt
-    and saved in the same folder as the input file, unless -OutputFolder is set.
+
+    The report files are automatically named:
+    - ssl_expiry_report_<timestamp>.txt
+    - ssl_expiry_report_<timestamp>.html
+
+    By default, both reports are saved in the Reports folder next to the script,
+    unless -OutputFolder is set.
+
     No third-party modules or Excel required.
+
 .PARAMETER InputFile
     Path to the input file.
-    TXT format  - one entry per line, port is optional:
+
+    TXT format - one entry per line, port is optional:
         portal01.zone-a.company.com:443
         portal02.zone-a.company.com:5480
         portal03.zone-a.company.com:9200
         portal04.zone-a.company.com        <- uses -DefaultPort if no port given
-    CSV format  - a column for FQDN and an optional column for port:
+
+    CSV format - a column for FQDN and an optional column for port:
         fqdn,port
         portal01.zone-a.company.com,443
         portal02.zone-a.company.com,5480
+
     Lines starting with # and blank lines are always skipped.
+
 .PARAMETER OutputFolder
-    Folder where the dated report file will be saved.
-    Default: same folder as the input file.
+    Folder where the dated TXT and HTML report files will be saved.
+    Default: Reports folder next to the script.
+
 .PARAMETER DefaultPort
     Port to use when no port is specified on a line. Default: 443
+
 .PARAMETER CsvColumn
     Column header for FQDNs in a CSV file. Default: fqdn
+
 .PARAMETER CsvPortColumn
     Column header for ports in a CSV file. Default: port
+
 .PARAMETER CsvDelimiter
     Delimiter used in the CSV file. Default: , (comma)
+
 .PARAMETER TimeoutSeconds
     TCP connection timeout per host/port combination. Default: 10
+
 .PARAMETER Threads
     Number of parallel runspaces. Default: 30
+
 .PARAMETER WarnCriticalDays
     Days threshold below which a cert is flagged CRITICAL. Default: 245
+
 .PARAMETER WarnWarningDays
     Days threshold below which a cert is flagged WARNING. Default: 365
+
+.PARAMETER OpenHtml
+    Opens the generated HTML report automatically without prompting.
+
+.PARAMETER NoPrompt
+    Suppresses the interactive prompt that asks whether to open the HTML report.
+
 .EXAMPLE
-    .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -WarnCriticalDays 245 -WarnWarningDays 365
-    # Saves report as: D:\SSL_Expiry_Checker\ssl_expiry_report_20260306.txt
+    .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt"
+
+    Saves reports as:
+    D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_2026-03-26_14-35-12.txt
+    D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_2026-03-26_14-35-12.html
+
 .EXAMPLE
     .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -OutputFolder "D:\SSL_Expiry_Checker\Reports"
-    # Saves report as: D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_20260306.txt
+
+    Saves reports as:
+    D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_2026-03-26_14-35-12.txt
+    D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_2026-03-26_14-35-12.html
+
+.EXAMPLE
+    .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -OpenHtml
+
+    Creates the reports and opens the HTML report automatically.
+
+.EXAMPLE
+    .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -NoPrompt
+
+    Creates the reports without any interactive prompt.
 #>
 
 [CmdletBinding()]
@@ -62,11 +106,30 @@ param(
     [int]     $TimeoutSeconds   = 10,
     [int]     $Threads          = 30,
     [int]     $WarnCriticalDays = 245,
-    [int]     $WarnWarningDays  = 365
+    [int]     $WarnWarningDays  = 365,
+
+    [switch]  $OpenHtml,
+    [switch]  $NoPrompt
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+Add-Type -AssemblyName System.Web
+
+function HtmlEncode {
+    param([AllowNull()][string]$Text)
+
+    if ($null -eq $Text) {
+        return ""
+    }
+
+    return [System.Web.HttpUtility]::HtmlEncode($Text)
+}
+
+if (-not (Test-Path $InputFile -PathType Leaf)) {
+    throw "Input file not found: $InputFile"
+}
 
 # ── Build dated output path ──────────────────────────────────────────────────
 $dateStamp         = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
@@ -74,18 +137,36 @@ $reportName        = "ssl_expiry_report_$dateStamp.txt"
 $htmlReportName    = "ssl_expiry_report_$dateStamp.html"
 $generatedDisplay  = $dateStamp
 
-if ($OutputFolder -ne "") {
-    if (-not (Test-Path $OutputFolder)) {
-        New-Item -ItemType Directory -Path $OutputFolder | Out-Null
+# ── Determine output folder (default = ./Reports next to script) ────────────
+if ([string]::IsNullOrWhiteSpace($OutputFolder)) {
+    $scriptFolder = if ($PSScriptRoot) {
+        $PSScriptRoot
+    } else {
+        Split-Path -Parent $MyInvocation.MyCommand.Path
     }
-    $resolvedOutputFolder = (Resolve-Path $OutputFolder).Path
-    $OutputFile     = Join-Path $resolvedOutputFolder $reportName
-    $HtmlOutputFile = Join-Path $resolvedOutputFolder $htmlReportName
-} else {
-    $inputFolder    = Split-Path (Resolve-Path $InputFile).Path -Parent
-    $OutputFile     = Join-Path $inputFolder $reportName
-    $HtmlOutputFile = Join-Path $inputFolder $htmlReportName
+
+    $resolvedOutputFolder = Join-Path $scriptFolder "Reports"
 }
+else {
+    $resolvedOutputFolder = $OutputFolder
+}
+
+# Ensure folder exists and is a directory
+if (Test-Path $resolvedOutputFolder) {
+    if (-not (Test-Path $resolvedOutputFolder -PathType Container)) {
+        throw "Output path exists but is not a directory: $resolvedOutputFolder"
+    }
+}
+else {
+    New-Item -ItemType Directory -Path $resolvedOutputFolder -Force | Out-Null
+}
+
+# Resolve full path
+$resolvedOutputFolder = (Resolve-Path $resolvedOutputFolder).Path
+
+# Build file paths
+$OutputFile     = Join-Path $resolvedOutputFolder $reportName
+$HtmlOutputFile = Join-Path $resolvedOutputFolder $htmlReportName
 
 # ── Read FQDN:PORT pairs from TXT or CSV ─────────────────────────────────────
 function Read-FQDNs {
@@ -125,22 +206,24 @@ function Read-FQDNs {
             Write-Host "  Format : CSV  (delimiter: '$Delimiter'  FQDN column: '$Column'  port column: '$PortColumn')"
             $rows = Import-Csv -Path $fullPath -Delimiter $Delimiter
 
-            if ($rows.Count -eq 0) {
-                Write-Host "  ERROR: CSV file appears to be empty." -ForegroundColor Red
-                exit 1
+            if (-not $rows) {
+                throw "CSV file appears to be empty."
             }
 
             $fqdnAliases = @($Column, "fqdn", "hostname", "host", "url", "name", "address")
             $headers     = $rows[0].PSObject.Properties.Name
             $matchedFqdn = $null
+
             foreach ($alias in $fqdnAliases) {
                 $hit = $headers | Where-Object { $_ -ieq $alias } | Select-Object -First 1
-                if ($hit) { $matchedFqdn = $hit; break }
+                if ($hit) {
+                    $matchedFqdn = $hit
+                    break
+                }
             }
+
             if (-not $matchedFqdn) {
-                Write-Host "  ERROR: Could not find FQDN column. Available: $($headers -join ', ')" -ForegroundColor Red
-                Write-Host "  Use -CsvColumn <n> to specify it." -ForegroundColor Yellow
-                exit 1
+                throw "Could not find FQDN column. Available: $($headers -join ', '). Use -CsvColumn to specify it."
             }
 
             $matchedPort = $headers | Where-Object { $_ -ieq $PortColumn } | Select-Object -First 1
@@ -153,18 +236,19 @@ function Read-FQDNs {
                 $parsedPort = 0
                 if ($matchedPort) {
                     $portVal = $row.$matchedPort
-                    if ($portVal -and [int]::TryParse($portVal.Trim(), [ref]$parsedPort) -and
+                    if ($portVal -and
+                        [int]::TryParse($portVal.Trim(), [ref]$parsedPort) -and
                         $parsedPort -gt 0 -and $parsedPort -le 65535) {
                         $port = $parsedPort
                     }
                 }
+
                 $jobs.Add(@{ FQDN = $fqdn.Trim(); Port = $port })
             }
         }
 
         default {
-            Write-Host "  ERROR: Unsupported file type '$extension'. Supported: .txt  .csv" -ForegroundColor Red
-            exit 1
+            throw "Unsupported file type '$extension'. Supported: .txt and .csv."
         }
     }
 
@@ -452,16 +536,20 @@ function New-HtmlReport {
         [int]$WarnDays
     )
 
+    $GeneratedEncoded = HtmlEncode $Generated
+    $SourceEncoded    = HtmlEncode $Source
+    $PortsEncoded     = HtmlEncode $Ports
+
     $rows = foreach ($r in $Results) {
         if ($r.Error) {
             @"
 <tr>
-    <td>$($r.FQDN)</td>
-    <td>$($r.Port)</td>
+    <td>$(HtmlEncode $r.FQDN)</td>
+    <td>$(HtmlEncode ([string]$r.Port))</td>
     <td class="status error">ERROR</td>
     <td class="expires error">-</td>
     <td>-</td>
-    <td>$($r.Error)</td>
+    <td>$(HtmlEncode $r.Error)</td>
 </tr>
 "@
         }
@@ -472,11 +560,11 @@ function New-HtmlReport {
 
             @"
 <tr>
-    <td>$($r.FQDN)</td>
-    <td>$($r.Port)</td>
-    <td class="status $statusClass">$statusText</td>
-    <td class="expires $statusClass">$($r.ExpiryDate)</td>
-    <td>$issuerText</td>
+    <td>$(HtmlEncode $r.FQDN)</td>
+    <td>$(HtmlEncode ([string]$r.Port))</td>
+    <td class="status $statusClass">$(HtmlEncode $statusText)</td>
+    <td class="expires $statusClass">$(HtmlEncode $r.ExpiryDate)</td>
+    <td>$(HtmlEncode $issuerText)</td>
     <td>-</td>
 </tr>
 "@
@@ -551,9 +639,9 @@ function New-HtmlReport {
     <h1>SSL Certificate Expiry Report</h1>
 
     <div class="meta">
-        <div><strong>Generated:</strong> $Generated</div>
-        <div><strong>Source:</strong> $Source</div>
-        <div><strong>Ports:</strong> $Ports</div>
+        <div><strong>Generated:</strong> $GeneratedEncoded</div>
+        <div><strong>Source:</strong> $SourceEncoded</div>
+        <div><strong>Ports:</strong> $PortsEncoded</div>
         <div><strong>Entries:</strong> $Entries</div>
     </div>
 
@@ -611,8 +699,7 @@ $jobs     = Read-FQDNs -Path $InputFile -Column $CsvColumn -PortColumn $CsvPortC
 $jobCount = $jobs.Count
 
 if ($jobCount -eq 0) {
-    Write-Host "  ERROR: No entries found in the input file." -ForegroundColor Red
-    exit 1
+    throw "No entries found in the input file."
 }
 
 $portsUsed = ($jobs | ForEach-Object { $_.Port } | Sort-Object -Unique) -join ", "
@@ -672,19 +759,21 @@ $reportLines.Add("  WARNING  : <= $WarnWarningDays days remaining")
 $reportLines.Add("  OK       : >  $WarnWarningDays days remaining")
 $reportLines.Add($sep)
 
-# 6a. Write report to file -----------------------------------------------------
+# 6a. Write TXT report --------------------------------------------------------
 try {
-    $reportLines | Set-Content -Path $OutputFile -Encoding UTF8
+    $reportLines | Set-Content -LiteralPath $OutputFile -Encoding UTF8
     Write-Host ""
     Write-Host "  Report saved to: $OutputFile" -ForegroundColor Green
-} catch {
+}
+catch {
     Write-Host ""
     Write-Host "  ERROR: Could not write report to '$OutputFile'" -ForegroundColor Red
     Write-Host "  $_" -ForegroundColor Red
 }
 Write-Host ""
+$htmlReportCreated = $false
 
-# 6b. Write HTML report to file ------------------------------------------------
+# 6b. Write HTML report -------------------------------------------------------
 try {
     $htmlReport = New-HtmlReport `
         -Results $sorted `
@@ -701,7 +790,7 @@ try {
         -WarnDays $WarnWarningDays
 
     $htmlReport | Set-Content -Path $HtmlOutputFile -Encoding UTF8
-
+    $htmlReportCreated = $true
     Write-Host "  HTML report saved to: $HtmlOutputFile" -ForegroundColor Green
 }
 catch {
@@ -740,26 +829,20 @@ foreach ($r in $sorted) {
 
 Write-Host ""
 Write-Host $sep
-Write-Host "  LEGEND"
+Write-Host "  LEGEND" -ForegroundColor Cyan
 Write-Host "  EXPIRED  / CRITICAL : " -NoNewline; Write-Host "Red    (action required)" -ForegroundColor Red
 Write-Host "  WARNING             : " -NoNewline; Write-Host "Yellow (renew soon)"      -ForegroundColor Yellow
 Write-Host "  OK                  : " -NoNewline; Write-Host "Green  (healthy)"         -ForegroundColor Green
 Write-Host $sep
-Write-Host ""
-
-# 8. Prompt to open HTML report ----------------------------------------------
-Write-Host ""
+Write-Host "  REPORT FILES" -ForegroundColor Cyan
+Write-Host "  TXT  : $OutputFile"
+Write-Host "  HTML : $HtmlOutputFile"
 Write-Host $sep
-Write-Host "  ACTION" -ForegroundColor Cyan
-Write-Host $sep
-Write-Host ""
-do {
-    $openHtml = Read-Host "  Do you want to open the HTML report now? (yes/no)"
-    $openHtml = $openHtml.Trim().ToLower()
-}
-while ($openHtml -notin @("yes", "no"))
 
-if ($openHtml -eq "yes") {
+# 8. Open HTML report logic ---------------------------------------------------
+
+# Case 1: Forced open
+if ($OpenHtml -and $htmlReportCreated) {
     try {
         Start-Process -FilePath $HtmlOutputFile
         Write-Host "  Opened HTML report: $HtmlOutputFile" -ForegroundColor Green
@@ -769,5 +852,58 @@ if ($openHtml -eq "yes") {
         Write-Host "  ERROR: Could not open HTML report '$HtmlOutputFile'" -ForegroundColor Red
         Write-Host "  $_" -ForegroundColor Red
         Write-Host ""
+    }
+}
+# Case 2: Forced open requested, but HTML was not created
+elseif ($OpenHtml -and -not $htmlReportCreated) {
+    Write-Host "  HTML report is not available to open." -ForegroundColor Yellow
+    Write-Host ""
+}
+# Case 3: Silent mode
+elseif ($NoPrompt) {
+    # Do nothing
+}
+# Case 4: HTML write failed, so do not prompt
+elseif (-not $htmlReportCreated) {
+    Write-Host "  HTML report is not available to open." -ForegroundColor Yellow
+    Write-Host ""
+}
+# Case 5: Interactive prompt
+else {
+    Write-Host "  ACTION" -ForegroundColor Cyan
+
+    do {
+        Write-Host "  Do you want to open the HTML report now? " -NoNewline
+        Write-Host "[Y/n]" -ForegroundColor Yellow -NoNewline
+        Write-Host ""
+
+        $openHtmlChoice = Read-Host "  >"
+        $openHtmlChoice = $openHtmlChoice.Trim().ToLower()
+
+        if ([string]::IsNullOrWhiteSpace($openHtmlChoice)) {
+            $openHtmlChoice = "y"
+        }
+
+        switch ($openHtmlChoice) {
+            "y"   { $openHtmlChoice = "yes" }
+            "yes" { $openHtmlChoice = "yes" }
+            "n"   { $openHtmlChoice = "no" }
+            "no"  { $openHtmlChoice = "no" }
+            default { $openHtmlChoice = "invalid" }
+        }
+
+    } while ($openHtmlChoice -eq "invalid")
+
+    if ($openHtmlChoice -eq "yes") {
+        try {
+            Start-Process -FilePath $HtmlOutputFile
+            Write-Host "  Opened HTML report: $HtmlOutputFile" -ForegroundColor Green
+            Write-Host ""
+        }
+        catch {
+            Write-Host "  ERROR: Could not open HTML report '$HtmlOutputFile'" -ForegroundColor Red
+            Write-Host "  $_" -ForegroundColor Red
+            Write-Host ""
+        }
     }
 }
