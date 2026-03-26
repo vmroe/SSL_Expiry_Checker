@@ -1,56 +1,143 @@
-# Intro
-Checks SSL certificate expiry for FQDNs listed in a TXT or CSV file. Port can be specified per entry directly in the input file.
+# SSL Certificate Expiry Checker (PowerShell)
+A lightweight, parallelized PowerShell script to check SSL/TLS certificate expiry for a list of FQDNs and ports.
+Designed for operational use in enterprise environments (e.g. VMware, NSX, load balancers, appliances), with TXT + HTML reporting, colorized console output, and parallel execution.
 
-Reads FQDN:PORT pairs from a plain text file or CSV file, connects to each host on the specified port over TLS, retrieves the certificate expiry date, and outputs a single list sorted by days remaining (soonest expiring first).
+# Features
+- Checks SSL certificates for multiple endpoints (FQDN + port)
+- Parallel execution using runspaces (fast for large environments)
 
-The report file is automatically named ssl_expiry_report_YYYYMMDD.txt and saved in the same folder as the input file, unless -OutputFolder is set.
-No third-party modules or Excel required.
+Generates two reports:
+- Plain text (.txt)
+- Styled HTML (.html)
 
-# Path to the input file.
-TXT format  - one entry per line, port is optional:
-- portal01.zone-a.company.com:443
-- portal02.zone-a.company.com:5480
-- portal03.zone-a.company.com:9200
-- portal04.zone-a.company.com        <- uses -DefaultPort if no port given
+Color-coded output:
+- Red → Expired / Critical
+- Yellow → Warning
+- Green → OK
 
-CSV format  - a column for FQDN and an optional column for port:
-- fqdn,port
-- portal01.zone-a.company.com,443
-- portal02.zone-a.company.com,5480
-- Lines starting with # and blank lines are always skipped.
+Includes:
+- Expiry date
+- Days remaining
+- Certificate issuer (CA)
+- Automatic report storage in ./Reports folder
+- Unique timestamp per run (no overwriting)
+- Interactive prompt (optional) to open HTML report
+- Supports both TXT and CSV input formats
+- No external modules required (pure PowerShell 5.1)
 
-# OutputFolder
-Folder where the dated report file will be saved.
-Default: same folder as the input file.
+# Requirements
+- Windows PowerShell 5.1
+- Network connectivity to target hosts
+- TLS-enabled services (HTTPS, vCenter, NSX, etc.)
 
-# DefaultPort
-Port to use when no port is specified on a line. Default: 443
-    
-# CsvColumn
-Column header for FQDNs in a CSV file. Default: fqdn
+# Input Formats
+TXT format
+- portal01.company.com:443
+- portal02.company.com:5480
+- portal03.company.com:9200
+- portal04.company.com
 
-# CsvPortColumn
-Column header for ports in a CSV file. Default: port
+If no port is specified → default port (443) is used
 
-# CsvDelimiter
-Delimiter used in the CSV file. Default: , (comma)
+CSV format
+fqdn,port
+portal01.company.com,443
+portal02.company.com,5480
 
-# TimeoutSeconds
-TCP connection timeout per host/port combination. Default: 10
+You can customize column names using parameters.
 
-# Threads
-Number of parallel runspaces. Default: 30
+# Usage
+Basic usage
+.\Check-SSLExpiry.ps1 -InputFile "C:\Scripts\fqdns.txt"
+Custom output folder
+.\Check-SSLExpiry.ps1 `
+    -InputFile "C:\Scripts\fqdns.txt" `
+    -OutputFolder "C:\Reports"
+Automatically open HTML report
+.\Check-SSLExpiry.ps1 `
+    -InputFile "C:\Scripts\fqdns.txt" `
+    -OpenHtml
+Silent mode (no prompt)
+.\Check-SSLExpiry.ps1 `
+    -InputFile "C:\Scripts\fqdns.txt" `
+    -NoPrompt
 
-# WarnCriticalDays
-Days threshold below which a cert is flagged CRITICAL. Default: 245
+# Output
+- Console Output
+- Real-time progress bar
+- Color-coded status overview
+- Sorted by days remaining (ascending)
 
-# WarnWarningDays
-Days threshold below which a cert is flagged WARNING. Default: 365
+Example:
+portal01.company.com:443     CRITICAL ( 12 of 365 days left) | Expires: 2026-04-07 | Issuer: DigiCert
+portal02.company.com:443     OK       (210 of 365 days left) | Expires: 2026-10-01 | Issuer: Sectigo
 
-# EXAMPLE
-Saves report as: D:\SSL_Expiry_Checker\SSL_expiry_report_20260306.txt
-.\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -WarnCriticalDays 245 -WarnWarningDays 365
+# Generated Reports
+Reports are saved in:
+./Reports/
 
-# EXAMPLE
-Saves report as: D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_20260306.txt
-.\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -OutputFolder "D:\SSL_Expiry_Checker\Reports"
+Example:
+- ssl_expiry_report_2026-03-26_14-35-12.txt
+- ssl_expiry_report_2026-03-26_14-35-12.html
+
+HTML Report
+- Clean, readable layout
+- Color-coded rows
+- Summary statistics
+Suitable for:
+- Operations teams
+- Management reporting
+- Audits
+
+# Parameters
+Parameter	Description
+InputFile	Path to TXT or CSV input file
+OutputFolder	Optional output directory
+DefaultPort	Port used when not specified (default: 443)
+CsvColumn	FQDN column name (default: fqdn)
+CsvPortColumn	Port column name (default: port)
+CsvDelimiter	CSV delimiter (default: ,)
+TimeoutSeconds	Connection timeout (default: 10)
+Threads	Parallel threads (default: 30)
+WarnCriticalDays	Critical threshold (default: 245)
+WarnWarningDays	Warning threshold (default: 365)
+OpenHtml	Open HTML report automatically
+NoPrompt	Disable interactive prompt
+
+# How it works
+Uses .NET TcpClient + SslStream to retrieve certificates
+Extracts:
+- Expiry date (NotAfter)
+- Validity period
+- Issuer CN
+- Executes checks in parallel using RunspacePool
+Aggregates results into:
+- Console output
+- TXT report
+- HTML report
+
+# Typical Use Cases
+VMware environments:
+- vCenter
+- NSX Managers
+- Aria components
+- VCD cells
+- Load balancers / reverse proxies
+- Internal PKI monitoring
+- Pre-audit compliance checks
+- Operational health dashboards
+
+# Notes
+- Certificate validation is not enforced (self-signed certs are accepted)
+- Script reports expiry only, not trust chain validity
+- Ensure firewall rules allow outbound connections to target ports
+
+# Future Enhancements (Ideas)
+- Email reporting
+- Teams / Slack notifications
+- Scheduled task integration
+- Export to CSV / JSON
+- Threshold-based alerting
+
+# License
+MIT License
