@@ -1,0 +1,15 @@
+################# Region A #################
+# Port 443
+fqdn_vcf_a_vcsa.local:443
+fqdn_vcf_a_nsx.local:443
+
+# Port 5480
+fqdn_vcf_a_vcsa.local:5480
+
+################# Region B #################
+# Port 443
+fqdn_vcf_b_vcsa.local:443
+fqdn_vcf_b_nsx.local:443
+
+# Port 5480
+fqdn_vcf_b_vcsa.local:5480
