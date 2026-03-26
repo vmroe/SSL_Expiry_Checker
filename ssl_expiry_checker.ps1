@@ -43,7 +43,7 @@
     Days threshold below which a cert is flagged WARNING. Default: 365
 .EXAMPLE
     .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -WarnCriticalDays 245 -WarnWarningDays 365
-    # Saves report as: D:\SSL_Expiry_Checker\SSL_expiry_report_20260306.txt
+    # Saves report as: D:\SSL_Expiry_Checker\ssl_expiry_report_20260306.txt
 .EXAMPLE
     .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -OutputFolder "D:\SSL_Expiry_Checker\Reports"
     # Saves report as: D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_20260306.txt
@@ -69,25 +69,33 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # ── Build dated output path ──────────────────────────────────────────────────
-$dateStamp   = Get-Date -Format "yyyyMMdd"
-$reportName  = "ssl_expiry_report_$dateStamp.txt"
+$dateStamp         = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+$reportName        = "ssl_expiry_report_$dateStamp.txt"
+$htmlReportName    = "ssl_expiry_report_$dateStamp.html"
+$generatedDisplay  = $dateStamp
 
 if ($OutputFolder -ne "") {
-    # Use the supplied folder, create it if it doesn't exist
     if (-not (Test-Path $OutputFolder)) {
         New-Item -ItemType Directory -Path $OutputFolder | Out-Null
     }
-    $OutputFile = Join-Path (Resolve-Path $OutputFolder).Path $reportName
+    $resolvedOutputFolder = (Resolve-Path $OutputFolder).Path
+    $OutputFile     = Join-Path $resolvedOutputFolder $reportName
+    $HtmlOutputFile = Join-Path $resolvedOutputFolder $htmlReportName
 } else {
-    # Default: same folder as the input file
-    $inputFolder = Split-Path (Resolve-Path $InputFile).Path -Parent
-    $OutputFile  = Join-Path $inputFolder $reportName
+    $inputFolder    = Split-Path (Resolve-Path $InputFile).Path -Parent
+    $OutputFile     = Join-Path $inputFolder $reportName
+    $HtmlOutputFile = Join-Path $inputFolder $htmlReportName
 }
 
 # ── Read FQDN:PORT pairs from TXT or CSV ─────────────────────────────────────
 function Read-FQDNs {
-    param([string]$Path, [string]$Column, [string]$PortColumn,
-          [string]$Delimiter, [int]$FallbackPort)
+    param(
+        [string]$Path,
+        [string]$Column,
+        [string]$PortColumn,
+        [string]$Delimiter,
+        [int]$FallbackPort
+    )
 
     $fullPath  = (Resolve-Path $Path).Path
     $extension = [System.IO.Path]::GetExtension($fullPath).ToLower()
@@ -163,6 +171,78 @@ function Read-FQDNs {
     return $jobs
 }
 
+# ── Helper functions ─────────────────────────────────────────────────────────
+function Get-StatusTag {
+    param(
+        $Result,
+        [int]$CritDays,
+        [int]$WarnDays
+    )
+
+    if ($Result.Error) {
+        return "ERROR"
+    }
+
+    $d = $Result.DaysLeft
+    $t = $Result.TotalDays
+
+    if     ($d -lt 0)         { return ("EXPIRED  ({0} days ago)" -f [Math]::Abs($d)) }
+    elseif ($d -le $CritDays) { return ("CRITICAL ({0,4} of {1} days left)" -f $d, $t) }
+    elseif ($d -le $WarnDays) { return ("WARNING  ({0,4} of {1} days left)" -f $d, $t) }
+    else                      { return ("OK       ({0,4} of {1} days left)" -f $d, $t) }
+}
+
+function Get-ResultColor {
+    param(
+        $Result,
+        [int]$CritDays,
+        [int]$WarnDays
+    )
+
+    if ($Result.Error) { return "Red" }
+
+    $d = $Result.DaysLeft
+
+    if     ($d -lt 0)         { return "Red" }
+    elseif ($d -le $CritDays) { return "Red" }
+    elseif ($d -le $WarnDays) { return "Yellow" }
+    else                      { return "Green" }
+}
+
+function Get-StatusClass {
+    param(
+        $Result,
+        [int]$CritDays,
+        [int]$WarnDays
+    )
+
+    if ($Result.Error) { return "error" }
+
+    $d = $Result.DaysLeft
+
+    if     ($d -lt 0)         { return "critical" }
+    elseif ($d -le $CritDays) { return "critical" }
+    elseif ($d -le $WarnDays) { return "warning" }
+    else                      { return "ok" }
+}
+
+function Get-IssuerDisplayName {
+    param([string]$Issuer)
+
+    if ([string]::IsNullOrWhiteSpace($Issuer)) {
+        return "-"
+    }
+
+    foreach ($part in ($Issuer -split ",\s*")) {
+        $trimmed = $part.Trim()
+        if ($trimmed.StartsWith("CN=", [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $trimmed.Substring(3)
+        }
+    }
+
+    return $Issuer
+}
+
 # ── Parallel execution via RunspacePool ──────────────────────────────────────
 function Invoke-Parallel {
     param(
@@ -174,12 +254,30 @@ function Invoke-Parallel {
     $certCheckScript = {
         param($FQDN, $Port, $TimeoutMs)
 
+        function Get-IssuerDisplayNameLocal {
+            param([string]$Issuer)
+
+            if ([string]::IsNullOrWhiteSpace($Issuer)) {
+                return "-"
+            }
+
+            foreach ($part in ($Issuer -split ",\s*")) {
+                $trimmed = $part.Trim()
+                if ($trimmed.StartsWith("CN=", [System.StringComparison]::OrdinalIgnoreCase)) {
+                    return $trimmed.Substring(3)
+                }
+            }
+
+            return $Issuer
+        }
+
         $result = [PSCustomObject]@{
             FQDN       = $FQDN
             Port       = $Port
             DaysLeft   = $null
             TotalDays  = $null
             ExpiryDate = $null
+            Issuer     = $null
             SubjectCN  = $null
             Thumbprint = $null
             Error      = $null
@@ -225,9 +323,12 @@ function Invoke-Parallel {
                     }
                 }
 
+                $issuerDisplay = Get-IssuerDisplayNameLocal -Issuer $cert2.Issuer
+
                 $result.DaysLeft   = $daysLeft
                 $result.TotalDays  = $totalDays
                 $result.ExpiryDate = $expiry.ToString("yyyy-MM-dd")
+                $result.Issuer     = if ($issuerDisplay) { $issuerDisplay } else { "-" }
                 $result.SubjectCN  = if ($cn) { $cn } else { "-" }
                 $result.Thumbprint = $cert2.Thumbprint
             }
@@ -287,47 +388,208 @@ function Invoke-Parallel {
 
 # ── Colour console output ─────────────────────────────────────────────────────
 function Write-StatusLine {
-    param($Result, [int]$CritDays, [int]$WarnDays)
+    param(
+        $Result,
+        [int]$CritDays,
+        [int]$WarnDays
+    )
 
-    $label = ("{0}:{1}" -f $Result.FQDN, $Result.Port).PadRight(62)
+    $label      = ("{0}:{1}" -f $Result.FQDN, $Result.Port).PadRight(62)
+    $issuerText = if ($Result.Issuer) { $Result.Issuer } else { "-" }
 
     if ($Result.Error) {
         Write-Host ("  {0}" -f $label) -NoNewline
-        Write-Host ("  ERROR   : {0}" -f $Result.Error) -ForegroundColor Red
+        Write-Host ("  ERROR   : {0}" -f $Result.Error) -ForegroundColor Red -NoNewline
+        Write-Host ("  |  Expires: {0}" -f "-") -NoNewline
+        Write-Host ("  |  Issuer: {0}" -f "-")
         return
     }
 
-    $d = $Result.DaysLeft
-    $t = $Result.TotalDays
-    if      ($d -lt 0)         { $tag = "EXPIRED  ({0} days ago)"         -f [Math]::Abs($d); $color = "Red"    }
-    elseif  ($d -le $CritDays) { $tag = "CRITICAL ({0,4} of {1} days left)" -f $d, $t;        $color = "Red"    }
-    elseif  ($d -le $WarnDays) { $tag = "WARNING  ({0,4} of {1} days left)" -f $d, $t;        $color = "Yellow" }
-    else                       { $tag = "OK       ({0,4} of {1} days left)" -f $d, $t;        $color = "Green"  }
+    $tag   = Get-StatusTag -Result $Result -CritDays $CritDays -WarnDays $WarnDays
+    $color = Get-ResultColor -Result $Result -CritDays $CritDays -WarnDays $WarnDays
 
     Write-Host ("  {0}  " -f $label) -NoNewline
     Write-Host ("{0}" -f $tag) -ForegroundColor $color -NoNewline
-    Write-Host ("  |  Expires: {0}" -f $Result.ExpiryDate)
+    Write-Host ("  |  Expires: ") -NoNewline
+    Write-Host ("{0}" -f $Result.ExpiryDate) -ForegroundColor $color -NoNewline
+    Write-Host ("  |  Issuer: {0}" -f $issuerText)
 }
 
 # ── Plain-text report line ────────────────────────────────────────────────────
 function Get-ReportLine {
-    param($Result, [int]$CritDays, [int]$WarnDays)
+    param(
+        $Result,
+        [int]$CritDays,
+        [int]$WarnDays
+    )
 
     $label = ("{0}:{1}" -f $Result.FQDN, $Result.Port).PadRight(62)
 
     if ($Result.Error) {
-        return "  {0}  ERROR   : {1}" -f $label, $Result.Error
+        return "  {0}  ERROR   : {1}  |  Expires: -  |  Issuer: -" -f $label, $Result.Error
     }
 
-    $d = $Result.DaysLeft
-    $t = $Result.TotalDays
-    if      ($d -lt 0)         { $tag = "EXPIRED  ({0} days ago)"           -f [Math]::Abs($d) }
-    elseif  ($d -le $CritDays) { $tag = "CRITICAL ({0,4} of {1} days left)" -f $d, $t }
-    elseif  ($d -le $WarnDays) { $tag = "WARNING  ({0,4} of {1} days left)" -f $d, $t }
-    else                       { $tag = "OK       ({0,4} of {1} days left)" -f $d, $t }
+    $tag       = Get-StatusTag -Result $Result -CritDays $CritDays -WarnDays $WarnDays
+    $issuerTxt = if ($Result.Issuer) { $Result.Issuer } else { "-" }
 
-    return "  {0}  {1}  |  Expires: {2}" -f `
-        $label, $tag, $Result.ExpiryDate
+    return "  {0}  {1}  |  Expires: {2}  |  Issuer: {3}" -f `
+        $label, $tag, $Result.ExpiryDate, $issuerTxt
+}
+
+function New-HtmlReport {
+    param(
+        [object[]]$Results,
+        [string]$Generated,
+        [string]$Source,
+        [string]$Ports,
+        [int]$Entries,
+        [int]$CntExpired,
+        [int]$CntCritical,
+        [int]$CntWarning,
+        [int]$CntOK,
+        [int]$CntErrors,
+        [int]$CritDays,
+        [int]$WarnDays
+    )
+
+    $rows = foreach ($r in $Results) {
+        if ($r.Error) {
+            @"
+<tr>
+    <td>$($r.FQDN)</td>
+    <td>$($r.Port)</td>
+    <td class="status error">ERROR</td>
+    <td class="expires error">-</td>
+    <td>-</td>
+    <td>$($r.Error)</td>
+</tr>
+"@
+        }
+        else {
+            $statusText  = Get-StatusTag   -Result $r -CritDays $CritDays -WarnDays $WarnDays
+            $statusClass = Get-StatusClass -Result $r -CritDays $CritDays -WarnDays $WarnDays
+            $issuerText  = if ($r.Issuer) { $r.Issuer } else { "-" }
+
+            @"
+<tr>
+    <td>$($r.FQDN)</td>
+    <td>$($r.Port)</td>
+    <td class="status $statusClass">$statusText</td>
+    <td class="expires $statusClass">$($r.ExpiryDate)</td>
+    <td>$issuerText</td>
+    <td>-</td>
+</tr>
+"@
+        }
+    }
+
+    return @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SSL Certificate Expiry Report</title>
+<style>
+    body {
+        font-family: Segoe UI, Arial, sans-serif;
+        margin: 24px;
+        background: #ffffff;
+        color: #222;
+    }
+    h1 {
+        margin-bottom: 8px;
+    }
+    .meta, .summary {
+        margin-bottom: 18px;
+    }
+    .summary span {
+        display: inline-block;
+        margin-right: 16px;
+        font-weight: 600;
+    }
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+    }
+    th, td {
+        border: 1px solid #d9d9d9;
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+    }
+    th {
+        background: #f3f3f3;
+    }
+    .ok {
+        background-color: #dff0d8;
+        color: #2e7d32;
+        font-weight: 600;
+    }
+    .warning {
+        background-color: #fff3cd;
+        color: #8a6d3b;
+        font-weight: 600;
+    }
+    .critical, .error {
+        background-color: #f8d7da;
+        color: #a94442;
+        font-weight: 600;
+    }
+    .legend {
+        margin-top: 18px;
+        padding: 12px;
+        border: 1px solid #d9d9d9;
+        background: #fafafa;
+    }
+    .legend div {
+        margin-bottom: 4px;
+    }
+</style>
+</head>
+<body>
+    <h1>SSL Certificate Expiry Report</h1>
+
+    <div class="meta">
+        <div><strong>Generated:</strong> $Generated</div>
+        <div><strong>Source:</strong> $Source</div>
+        <div><strong>Ports:</strong> $Ports</div>
+        <div><strong>Entries:</strong> $Entries</div>
+    </div>
+
+    <div class="summary">
+        <span style="color:#a94442;">Expired: $CntExpired</span>
+        <span style="color:#a94442;">Critical (≤ $CritDays days): $CntCritical</span>
+        <span style="color:#8a6d3b;">Warning (≤ $WarnDays days): $CntWarning</span>
+        <span style="color:#2e7d32;">OK: $CntOK</span>
+        <span>Errors: $CntErrors</span>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>FQDN</th>
+                <th>Port</th>
+                <th>Status</th>
+                <th>Expiry Date</th>
+                <th>Issuer</th>
+                <th>Error</th>
+            </tr>
+        </thead>
+        <tbody>
+$($rows -join "`r`n")
+        </tbody>
+    </table>
+
+    <div class="legend">
+        <div><strong>Legend</strong></div>
+        <div><strong>Expired / Critical</strong>: action required</div>
+        <div><strong>Warning</strong>: renew soon</div>
+        <div><strong>OK</strong>: healthy</div>
+    </div>
+</body>
+</html>
+"@
 }
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -340,8 +602,10 @@ Write-Host "  ══════════════════════
 Write-Host ""
 
 # 1. Read FQDN:PORT pairs -----------------------------------------------------
-Write-Host "  Input  : $InputFile"
-Write-Host "  Output : $OutputFile"
+Write-Host "  Input   : $InputFile"
+Write-Host "  TXT Out : $OutputFile"
+Write-Host "  HTML Out: $HtmlOutputFile"
+
 $jobs     = Read-FQDNs -Path $InputFile -Column $CsvColumn -PortColumn $CsvPortColumn `
                        -Delimiter $CsvDelimiter -FallbackPort $DefaultPort
 $jobCount = $jobs.Count
@@ -377,8 +641,8 @@ $cntOK       = @($sorted | Where-Object { $null -ne $_.DaysLeft -and $_.DaysLeft
 $cntErrors   = @($sorted | Where-Object { $null -ne $_.Error }).Count
 
 # 5. Assemble report ----------------------------------------------------------
-$sep    = "-" * 95
-$nowStr = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$sep    = "-" * 125
+$nowStr = $generatedDisplay
 
 $reportLines = [System.Collections.Generic.List[string]]::new()
 $reportLines.Add($sep)
@@ -390,8 +654,8 @@ $reportLines.Add("  Entries   : $jobCount")
 $reportLines.Add("  Results   : Expired: $cntExpired  |  Critical (le ${WarnCriticalDays}d): $cntCritical  |  Warning (le ${WarnWarningDays}d): $cntWarning  |  OK: $cntOK  |  Errors: $cntErrors")
 $reportLines.Add($sep)
 $reportLines.Add("")
-$reportLines.Add(("  {0}  {1}  {2}" -f "FQDN:PORT".PadRight(62), "STATUS".PadRight(22), "EXPIRY DATE"))
-$reportLines.Add("  " + ("-" * 91))
+$reportLines.Add(("  {0}  {1}  {2}  {3}" -f "FQDN:PORT".PadRight(62), "STATUS".PadRight(22), "EXPIRY DATE".PadRight(12), "ISSUER"))
+$reportLines.Add("  " + ("-" * 121))
 
 foreach ($r in $sorted) {
     $reportLines.Add((Get-ReportLine -Result $r -CritDays $WarnCriticalDays -WarnDays $WarnWarningDays))
@@ -408,7 +672,7 @@ $reportLines.Add("  WARNING  : <= $WarnWarningDays days remaining")
 $reportLines.Add("  OK       : >  $WarnWarningDays days remaining")
 $reportLines.Add($sep)
 
-# 6. Write report to file -----------------------------------------------------
+# 6a. Write report to file -----------------------------------------------------
 try {
     $reportLines | Set-Content -Path $OutputFile -Encoding UTF8
     Write-Host ""
@@ -418,6 +682,40 @@ try {
     Write-Host "  ERROR: Could not write report to '$OutputFile'" -ForegroundColor Red
     Write-Host "  $_" -ForegroundColor Red
 }
+Write-Host ""
+
+# 6b. Write HTML report to file ------------------------------------------------
+try {
+    $htmlReport = New-HtmlReport `
+        -Results $sorted `
+        -Generated $nowStr `
+        -Source $InputFile `
+        -Ports $portsUsed `
+        -Entries $jobCount `
+        -CntExpired $cntExpired `
+        -CntCritical $cntCritical `
+        -CntWarning $cntWarning `
+        -CntOK $cntOK `
+        -CntErrors $cntErrors `
+        -CritDays $WarnCriticalDays `
+        -WarnDays $WarnWarningDays
+
+    $htmlReport | Set-Content -Path $HtmlOutputFile -Encoding UTF8
+
+    Write-Host "  HTML report saved to: $HtmlOutputFile" -ForegroundColor Green
+}
+catch {
+    Write-Host "  ERROR: Could not write HTML report to '$HtmlOutputFile'" -ForegroundColor Red
+    Write-Host "  $_" -ForegroundColor Red
+}
+
+# 6c. Show report locations ---------------------------------------------------
+Write-Host ""
+Write-Host $sep
+Write-Host "  REPORT FILES" -ForegroundColor Cyan
+Write-Host "  TXT  : $OutputFile"
+Write-Host "  HTML : $HtmlOutputFile"
+Write-Host $sep
 Write-Host ""
 
 # 7. Colour-coded console output ----------------------------------------------
@@ -433,8 +731,8 @@ Write-Host "OK: $cntOK  "             -ForegroundColor Green  -NoNewline
 Write-Host "Errors: $cntErrors"
 Write-Host $sep
 Write-Host ""
-Write-Host ("  {0}  {1}  {2}" -f "FQDN:PORT".PadRight(62), "STATUS".PadRight(22), "EXPIRY DATE")
-Write-Host ("  " + ("-" * 91))
+Write-Host ("  {0}  {1}  {2}  {3}" -f "FQDN:PORT".PadRight(62), "STATUS".PadRight(22), "EXPIRY DATE".PadRight(12), "ISSUER")
+Write-Host ("  " + ("-" * 121))
 
 foreach ($r in $sorted) {
     Write-StatusLine -Result $r -CritDays $WarnCriticalDays -WarnDays $WarnWarningDays
@@ -448,3 +746,28 @@ Write-Host "  WARNING             : " -NoNewline; Write-Host "Yellow (renew soon
 Write-Host "  OK                  : " -NoNewline; Write-Host "Green  (healthy)"         -ForegroundColor Green
 Write-Host $sep
 Write-Host ""
+
+# 8. Prompt to open HTML report ----------------------------------------------
+Write-Host ""
+Write-Host $sep
+Write-Host "  ACTION" -ForegroundColor Cyan
+Write-Host $sep
+Write-Host ""
+do {
+    $openHtml = Read-Host "  Do you want to open the HTML report now? (yes/no)"
+    $openHtml = $openHtml.Trim().ToLower()
+}
+while ($openHtml -notin @("yes", "no"))
+
+if ($openHtml -eq "yes") {
+    try {
+        Start-Process -FilePath $HtmlOutputFile
+        Write-Host "  Opened HTML report: $HtmlOutputFile" -ForegroundColor Green
+        Write-Host ""
+    }
+    catch {
+        Write-Host "  ERROR: Could not open HTML report '$HtmlOutputFile'" -ForegroundColor Red
+        Write-Host "  $_" -ForegroundColor Red
+        Write-Host ""
+    }
+}
