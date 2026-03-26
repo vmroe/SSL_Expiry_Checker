@@ -47,9 +47,9 @@ Days threshold below which a cert is flagged CRITICAL. Default: 245
 Days threshold below which a cert is flagged WARNING. Default: 365
 
 # EXAMPLE
-# Saves report as: D:\SSL_Expiry_Checker\SSL_expiry_report_20260306.txt
+Saves report as: D:\SSL_Expiry_Checker\SSL_expiry_report_20260306.txt
 .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -WarnCriticalDays 245 -WarnWarningDays 365
 
 # EXAMPLE
-# Saves report as: D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_20260306.txt
+Saves report as: D:\SSL_Expiry_Checker\Reports\ssl_expiry_report_20260306.txt
 .\Check-SSLExpiry.ps1 -InputFile "D:\SSL_Expiry_Checker\fqdns.txt" -OutputFolder "D:\SSL_Expiry_Checker\Reports"
